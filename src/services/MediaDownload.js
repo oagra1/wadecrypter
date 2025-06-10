@@ -1,101 +1,157 @@
-const fetch = require('node-fetch');
-const logger = require('../utils/logger');
-const { NetworkError } = require('../utils/errors');
+const fastify = require('fastify')({
+  logger: {
+    level: process.env.LOG_LEVEL || 'info'
+  },
+  bodyLimit: 104857600, // 100MB
+  pluginTimeout: 60000
+});
 
-class MediaDownload {
-  static async downloadMedia(mediaUrl, options = {}) {
-    const {
-      timeout = 60000,
-      retries = 3,
-      retryDelay = 1000
-    } = options;
+const path = require('path');
+const crypto = require('crypto');
 
-    let lastError;
+// Security middleware
+fastify.register(require('@fastify/helmet'), {
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'none'"],
+      scriptSrc: ["'self'"],
+      styleSrc: ["'self'"],
+      imgSrc: ["'self'", "data:"],
+      connectSrc: ["'self'"],
+      fontSrc: ["'self'"],
+      objectSrc: ["'none'"],
+      mediaSrc: ["'self'"],
+      frameSrc: ["'none'"]
+    }
+  }
+});
+
+fastify.register(require('@fastify/cors'), {
+  origin: process.env.ALLOWED_ORIGINS?.split(',') || ['http://localhost:5678'],
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-API-Key']
+});
+
+// Rate limiting
+fastify.register(require('@fastify/rate-limit'), {
+  max: parseInt(process.env.RATE_LIMIT_MAX) || 100,
+  timeWindow: '15 minutes'
+});
+
+// Multipart support for file uploads
+fastify.register(require('@fastify/multipart'), {
+  limits: {
+    fieldNameSize: 100,
+    fieldSize: 100,
+    fields: 10,
+    fileSize: 104857600, // 100MB
+    files: 1,
+    headerPairs: 2000
+  }
+});
+
+// Import services and routes
+const mediaRoutes = require('./routes/media');
+const FileManager = require('./services/FileManager');
+const logger = require('./utils/logger');
+
+// Health check endpoint
+fastify.get('/health', async (request, reply) => {
+  const memoryUsage = process.memoryUsage();
+  
+  return {
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    uptime: Math.floor(process.uptime()),
+    memory: {
+      used: Math.round(memoryUsage.heapUsed / 1024 / 1024),
+      total: Math.round(memoryUsage.heapTotal / 1024 / 1024),
+      external: Math.round(memoryUsage.external / 1024 / 1024),
+      unit: 'MB'
+    },
+    version: process.env.npm_package_version || '1.0.0'
+  };
+});
+
+// API Key Authentication
+fastify.register(async function (fastify) {
+  fastify.addHook('preHandler', async (request, reply) => {
+    // Skip auth for health check
+    if (request.url === '/health') return;
     
-    for (let attempt = 1; attempt <= retries; attempt++) {
-      try {
-        logger.info(`Downloading media attempt ${attempt}/${retries}`, {
-          url: mediaUrl.substring(0, 50) + '...'
-        });
-
-        const response = await fetch(mediaUrl, {
-          timeout,
-          headers: {
-            'User-Agent': 'WhatsApp/2.23.20 (iPhone; iOS 16.6; Scale/3.00)',
-            'Accept': '*/*',
-            'Accept-Encoding': 'identity', // Don't use compression for encrypted data
-            'Connection': 'keep-alive'
-          }
-        });
-
-        if (!response.ok) {
-          throw new NetworkError(`HTTP ${response.status}: ${response.statusText}`);
-        }
-
-        const contentLength = response.headers.get('content-length');
-        if (contentLength) {
-          const sizeMB = Math.round(parseInt(contentLength) / 1024 / 1024);
-          logger.info(`Downloading ${sizeMB}MB file`);
-        }
-
-        const buffer = Buffer.from(await response.arrayBuffer());
-        
-        logger.info('Media download completed', {
-          size: buffer.length,
-          attempt
-        });
-
-        return buffer;
-
-      } catch (error) {
-        lastError = error;
-        
-        if (attempt < retries) {
-          logger.warn(`Download attempt ${attempt} failed, retrying in ${retryDelay}ms`, {
-            error: error.message
-          });
-          
-          await new Promise(resolve => setTimeout(resolve, retryDelay * attempt));
-        } else {
-          logger.error('All download attempts failed', {
-            error: error.message,
-            attempts: retries
-          });
-        }
-      }
+    const apiKey = request.headers['x-api-key'] || request.headers['authorization']?.replace('Bearer ', '');
+    
+    if (!apiKey) {
+      return reply.status(401).send({ 
+        error: 'API key required',
+        message: 'Include X-API-Key header or Bearer token'
+      });
     }
-
-    throw new NetworkError(`Failed to download media after ${retries} attempts: ${lastError.message}`, lastError);
-  }
-
-  static validateUrl(url) {
-    try {
-      const urlObj = new URL(url);
-      
-      // Check if it's HTTPS (required for WhatsApp media)
-      if (urlObj.protocol !== 'https:') {
-        throw new Error('URL must use HTTPS protocol');
-      }
-
-      // Basic WhatsApp media URL validation
-      const validHosts = [
-        'mmg.whatsapp.net',
-        'mmg-fna.whatsapp.net',
-        'media-frt3-1.cdn.whatsapp.net',
-        'pps.whatsapp.net'
-      ];
-
-      if (!validHosts.some(host => urlObj.hostname.includes(host))) {
-        logger.warn('URL may not be a valid WhatsApp media URL', {
-          hostname: urlObj.hostname
-        });
-      }
-
-      return true;
-    } catch (error) {
-      throw new Error(`Invalid media URL: ${error.message}`);
+    
+    const validApiKey = process.env.API_KEY || 'your-secure-api-key';
+    
+    if (apiKey !== validApiKey) {
+      return reply.status(403).send({ 
+        error: 'Invalid API key',
+        message: 'Provided API key is not valid'
+      });
     }
-  }
-}
+  });
+});
 
-module.exports = MediaDownload;
+// Register media routes
+fastify.register(mediaRoutes, { prefix: '/api/v1' });
+
+// Global error handler
+fastify.setErrorHandler(async (error, request, reply) => {
+  fastify.log.error('Unhandled error', {
+    error: error.message,
+    stack: error.stack,
+    url: request.url,
+    method: request.method,
+    requestId: request.id
+  });
+
+  return reply.status(500).send({
+    error: 'Internal server error',
+    requestId: request.id,
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Graceful shutdown
+const gracefulShutdown = async (signal) => {
+  fastify.log.info(`Received ${signal}, starting graceful shutdown`);
+  
+  try {
+    await FileManager.cleanup();
+    await fastify.close();
+    fastify.log.info('Server closed gracefully');
+    process.exit(0);
+  } catch (error) {
+    fastify.log.error('Error during shutdown', error);
+    process.exit(1);
+  }
+};
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+// Start server
+const start = async () => {
+  try {
+    await FileManager.ensureDirectories();
+    
+    const host = process.env.HOST || '0.0.0.0';
+    const port = parseInt(process.env.PORT) || 3000;
+    
+    await fastify.listen({ host, port });
+    fastify.log.info(`Server listening on ${host}:${port}`);
+    
+  } catch (error) {
+    fastify.log.error('Failed to start server', error);
+    process.exit(1);
+  }
+};
+
+start();
