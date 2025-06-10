@@ -57,7 +57,7 @@ fastify.register(require('@fastify/multipart'), {
 });
 
 // Import services and routes
-const MediaDecryption = require('./services/MediaDecryption');
+const mediaRoutes = require('./routes/media');
 const FileManager = require('./services/FileManager');
 const logger = require('./utils/logger');
 
@@ -79,113 +79,34 @@ fastify.get('/health', async (request, reply) => {
   };
 });
 
-// Media decryption endpoint
-fastify.post('/api/v1/decrypt', {
-  schema: {
-    body: {
-      type: 'object',
-      required: ['mediaUrl', 'mediaKey', 'mediaType'],
-      properties: {
-        mediaUrl: { 
-          type: 'string', 
-          format: 'uri',
-          pattern: '^https?://'
-        },
-        mediaKey: { 
-          type: 'string',
-          minLength: 32,
-          maxLength: 100
-        },
-        mediaType: { 
-          type: 'string', 
-          enum: ['image', 'video', 'audio', 'document']
-        },
-        iv: { 
-          type: 'string',
-          minLength: 16
-        }
-      }
-    }
-  }
-}, async (request, reply) => {
-  const startTime = Date.now();
-  const { mediaUrl, mediaKey, mediaType, iv } = request.body;
-  
-  try {
-    logger.info('Starting media decryption', {
-      mediaType,
-      mediaUrl: mediaUrl.substring(0, 50) + '...',
-      requestId: request.id
-    });
-
-    // Validate and expand media key using HKDF
-    const expandedKey = MediaDecryption.expandMediaKey(mediaKey, mediaType);
+// API Key Authentication
+fastify.register(async function (fastify) {
+  fastify.addHook('preHandler', async (request, reply) => {
+    // Skip auth for health check
+    if (request.url === '/health') return;
     
-    // Download and decrypt media
-    const decryptedStream = await MediaDecryption.decryptMedia(
-      mediaUrl, 
-      expandedKey,
-      mediaType
-    );
-
-    // Set appropriate headers
-    const contentType = MediaDecryption.getContentType(mediaType);
-    const filename = `decrypted_${Date.now()}.${MediaDecryption.getFileExtension(mediaType)}`;
+    const apiKey = request.headers['x-api-key'] || request.headers['authorization']?.replace('Bearer ', '');
     
-    reply.header('Content-Type', contentType);
-    reply.header('Content-Disposition', `attachment; filename="${filename}"`);
-    reply.header('Cache-Control', 'no-cache, no-store, must-revalidate');
-    reply.header('X-Content-Type-Options', 'nosniff');
-    
-    const processingTime = Date.now() - startTime;
-    logger.info('Media decryption completed', {
-      mediaType,
-      processingTime,
-      requestId: request.id
-    });
-
-    return reply.send(decryptedStream);
-
-  } catch (error) {
-    const processingTime = Date.now() - startTime;
-    logger.error('Media decryption failed', {
-      error: error.message,
-      mediaType,
-      processingTime,
-      requestId: request.id
-    });
-
-    if (error.name === 'ValidationError') {
-      return reply.status(400).send({
-        error: 'Invalid input parameters',
-        message: error.message,
-        requestId: request.id
+    if (!apiKey) {
+      return reply.status(401).send({ 
+        error: 'API key required',
+        message: 'Include X-API-Key header or Bearer token'
       });
     }
-
-    if (error.name === 'DecryptionError') {
-      return reply.status(422).send({
-        error: 'Decryption failed',
-        message: 'Invalid media key or corrupted file',
-        requestId: request.id
+    
+    const validApiKey = process.env.API_KEY || 'your-secure-api-key';
+    
+    if (apiKey !== validApiKey) {
+      return reply.status(403).send({ 
+        error: 'Invalid API key',
+        message: 'Provided API key is not valid'
       });
     }
-
-    if (error.name === 'NetworkError') {
-      return reply.status(502).send({
-        error: 'Network error',
-        message: 'Failed to download media file',
-        requestId: request.id
-      });
-    }
-
-    return reply.status(500).send({
-      error: 'Internal server error',
-      message: 'Media processing failed',
-      requestId: request.id
-    });
-  }
+  });
 });
+
+// Register media routes
+fastify.register(mediaRoutes, { prefix: '/api/v1' });
 
 // Global error handler
 fastify.setErrorHandler(async (error, request, reply) => {
