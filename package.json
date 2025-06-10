@@ -1,0 +1,27 @@
+{
+  "name": "whatsapp-media-decryption",
+  "version": "1.0.0",
+  "description": "WhatsApp media decryption service for EasyPanel deployment",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js",
+    "health": "node healthcheck.js"
+  },
+  "dependencies": {
+    "fastify": "^4.24.3",
+    "@fastify/helmet": "^11.1.1",
+    "@fastify/cors": "^8.4.0",
+    "@fastify/rate-limit": "^9.1.0",
+    "@fastify/multipart": "^8.0.0",
+    "node-fetch": "^3.3.2",
+    "winston": "^3.11.0",
+    "joi": "^17.11.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
