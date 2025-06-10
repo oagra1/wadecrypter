@@ -1,31 +1,6 @@
 const crypto = require('crypto');
-const fetch = require('node-fetch');
-const { pipeline } = require('stream/promises');
-const { Transform } = require('stream');
 const logger = require('../utils/logger');
-
-class DecryptionError extends Error {
-  constructor(message, originalError = null) {
-    super(message);
-    this.name = 'DecryptionError';
-    this.originalError = originalError;
-  }
-}
-
-class NetworkError extends Error {
-  constructor(message, originalError = null) {
-    super(message);
-    this.name = 'NetworkError';
-    this.originalError = originalError;
-  }
-}
-
-class ValidationError extends Error {
-  constructor(message) {
-    super(message);
-    this.name = 'ValidationError';
-  }
-}
+const { DecryptionError, ValidationError } = require('../utils/errors');
 
 class MediaDecryption {
   /**
@@ -73,24 +48,10 @@ class MediaDecryption {
   }
 
   /**
-   * Download and decrypt WhatsApp media file
+   * Decrypt WhatsApp media data from buffer
    */
-  static async decryptMedia(mediaUrl, expandedKey, mediaType) {
+  static async decryptData(encryptedData, expandedKey) {
     try {
-      // Download encrypted media
-      const response = await fetch(mediaUrl, {
-        timeout: 60000,
-        headers: {
-          'User-Agent': 'WhatsApp/2.23.20 (iPhone; iOS 16.6; Scale/3.00)'
-        }
-      });
-
-      if (!response.ok) {
-        throw new NetworkError(`HTTP ${response.status}: ${response.statusText}`);
-      }
-
-      const encryptedData = Buffer.from(await response.arrayBuffer());
-      
       if (encryptedData.length < 10) {
         throw new DecryptionError('File too small to be valid encrypted media');
       }
@@ -116,8 +77,7 @@ class MediaDecryption {
       decrypted = Buffer.concat([decrypted, decipher.update(encryptedContent)]);
       decrypted = Buffer.concat([decrypted, decipher.final()]);
 
-      logger.info('Media decryption successful', {
-        mediaType,
+      logger.info('Media data decryption successful', {
         originalSize: encryptedData.length,
         decryptedSize: decrypted.length
       });
@@ -125,15 +85,30 @@ class MediaDecryption {
       return decrypted;
 
     } catch (error) {
-      if (error instanceof NetworkError || error instanceof DecryptionError) {
+      if (error instanceof DecryptionError) {
         throw error;
       }
       
-      if (error.code === 'ENOTFOUND' || error.code === 'ECONNREFUSED') {
-        throw new NetworkError('Failed to connect to media server', error);
-      }
-      
       throw new DecryptionError('Unexpected decryption error', error);
+    }
+  }
+
+  /**
+   * Secure cleanup of key material
+   */
+  static secureKeyCleanup(expandedKey) {
+    try {
+      // Zero out sensitive key material
+      if (expandedKey.cipherKey) expandedKey.cipherKey.fill(0);
+      if (expandedKey.macKey) expandedKey.macKey.fill(0);
+      if (expandedKey.iv) expandedKey.iv.fill(0);
+      
+      // Force garbage collection if available
+      if (global.gc) {
+        global.gc();
+      }
+    } catch (error) {
+      logger.warn('Error during key cleanup', error);
     }
   }
 
