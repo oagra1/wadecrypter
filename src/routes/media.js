@@ -1,7 +1,7 @@
 const MediaDecryption = require('../services/MediaDecryption');
-const MediaDownload = require('../services/MediaDownload');
 const { ValidationError, DecryptionError, NetworkError } = require('../utils/errors');
 const logger = require('../utils/logger');
+const fetch = require('node-fetch');
 
 async function mediaRoutes(fastify, options) {
   
@@ -47,14 +47,25 @@ async function mediaRoutes(fastify, options) {
         requestId: request.id
       });
 
-      // Validate URL
-      MediaDownload.validateUrl(mediaUrl);
-
       // Validate and expand media key
       const expandedKey = MediaDecryption.expandMediaKey(mediaKey, mediaType);
       
       // Download encrypted media
-      const encryptedData = await MediaDownload.downloadMedia(mediaUrl, options);
+      const response = await fetch(mediaUrl, {
+        timeout: options.timeout || 60000,
+        headers: {
+          'User-Agent': 'WhatsApp/2.23.20 (iPhone; iOS 16.6; Scale/3.00)',
+          'Accept': '*/*',
+          'Accept-Encoding': 'identity',
+          'Connection': 'keep-alive'
+        }
+      });
+
+      if (!response.ok) {
+        throw new NetworkError(`HTTP ${response.status}: ${response.statusText}`);
+      }
+
+      const encryptedData = Buffer.from(await response.arrayBuffer());
       
       // Decrypt media
       const decryptedData = await MediaDecryption.decryptData(encryptedData, expandedKey);
@@ -106,7 +117,7 @@ async function mediaRoutes(fastify, options) {
         });
       }
 
-      if (error instanceof NetworkError) {
+      if (error instanceof NetworkError || error.code === 'ENOTFOUND' || error.code === 'ECONNREFUSED') {
         return reply.status(502).send({
           error: 'Network error',
           message: 'Failed to download media file',
