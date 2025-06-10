@@ -1,12 +1,6 @@
 const fastify = require('fastify')({
   logger: {
-    level: process.env.LOG_LEVEL || 'info',
-    transport: {
-      target: 'pino-pretty',
-      options: {
-        colorize: true
-      }
-    }
+    level: process.env.LOG_LEVEL || 'info'
   },
   bodyLimit: 104857600, // 100MB
   pluginTimeout: 60000
@@ -110,7 +104,7 @@ fastify.register(mediaRoutes, { prefix: '/api/v1' });
 
 // Global error handler
 fastify.setErrorHandler(async (error, request, reply) => {
-  logger.error('Unhandled error', {
+  fastify.log.error('Unhandled error', {
     error: error.message,
     stack: error.stack,
     url: request.url,
@@ -125,39 +119,4 @@ fastify.setErrorHandler(async (error, request, reply) => {
   });
 });
 
-// Graceful shutdown
-const gracefulShutdown = async (signal) => {
-  logger.info(`Received ${signal}, starting graceful shutdown`);
-  
-  try {
-    await FileManager.cleanup();
-    await fastify.close();
-    logger.info('Server closed gracefully');
-    process.exit(0);
-  } catch (error) {
-    logger.error('Error during shutdown', error);
-    process.exit(1);
-  }
-};
-
-process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-process.on('SIGINT', () => gracefulShutdown('SIGINT'));
-
-// Start server
-const start = async () => {
-  try {
-    await FileManager.ensureDirectories();
-    
-    const host = process.env.HOST || '0.0.0.0';
-    const port = parseInt(process.env.PORT) || 3000;
-    
-    await fastify.listen({ host, port });
-    logger.info(`Server listening on ${host}:${port}`);
-    
-  } catch (error) {
-    logger.error('Failed to start server', error);
-    process.exit(1);
-  }
-};
-
-start();
+// Grac
