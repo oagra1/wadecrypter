@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  whatsapp-decrypt:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=development
+      - PORT=3000
+      - HOST=0.0.0.0
+      - LOG_LEVEL=debug
+      - API_KEY=dev-test-key-123
+      - RATE_LIMIT_MAX=1000
+      - TEMP_DIR=/tmp/media-decrypt
+      - CLEANUP_INTERVAL=1800000
+      - MAX_FILE_AGE=1800000
+    volumes:
+      - ./src:/usr/src/app/src:ro
+      - temp_media:/tmp/media-decrypt
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "healthcheck.js"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  temp_media:
+    driver: local
