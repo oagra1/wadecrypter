@@ -2,8 +2,10 @@ const fastify = require('fastify')({
   logger: true
 });
 
-const crypto = require('crypto');
-const fetch = require('node-fetch');
+const MediaDownload = require('./services/MediaDownload');
+const MediaDecryption = require('./services/MediaDecryption');
+const FileManager = require('./services/FileManager');
+const { DecryptionError, NetworkError, ValidationError } = require('./utils/errors');
 
 // Health check
 fastify.get('/health', async (request, reply) => {
@@ -43,108 +45,99 @@ fastify.addHook('preHandler', async (request, reply) => {
   }
 });
 
-// Função de descriptografia
-function expandMediaKey(mediaKeyBase64, mediaType) {
-  const mediaKey = Buffer.from(mediaKeyBase64, 'base64');
-  
-  if (mediaKey.length !== 32) {
-    throw new Error(`Invalid media key length: ${mediaKey.length}, expected 32 bytes`);
-  }
-
-  const applicationInfo = {
-    'image': 'WhatsApp Image Keys',
-    'video': 'WhatsApp Video Keys', 
-    'audio': 'WhatsApp Audio Keys',
-    'document': 'WhatsApp Document Keys'
-  };
-
-  const info = applicationInfo[mediaType];
-  if (!info) {
-    throw new Error(`Unsupported media type: ${mediaType}`);
-  }
-
-  const salt = Buffer.alloc(32);
-  const expandedKey = crypto.hkdfSync('sha256', mediaKey, salt, info, 112);
-
-  return {
-    cipherKey: expandedKey.slice(0, 32),
-    macKey: expandedKey.slice(32, 64), 
-    iv: expandedKey.slice(64, 80)
-  };
-}
-
-function decryptData(encryptedData, expandedKey) {
-  if (encryptedData.length < 10) {
-    throw new Error('File too small to be valid encrypted media');
-  }
-
-  const fileMac = encryptedData.slice(0, 10);
-  const encryptedContent = encryptedData.slice(10);
-
-  const expectedMac = crypto.createHmac('sha256', expandedKey.macKey)
-    .update(encryptedContent)
-    .digest()
-    .slice(0, 10);
-
-  if (!crypto.timingSafeEqual(fileMac, expectedMac)) {
-    throw new Error('MAC verification failed - invalid key or corrupted file');
-  }
-
-  const decipher = crypto.createDecipheriv('aes-256-cbc', expandedKey.cipherKey, expandedKey.iv);
-  
-  let decrypted = Buffer.alloc(0);
-  decrypted = Buffer.concat([decrypted, decipher.update(encryptedContent)]);
-  decrypted = Buffer.concat([decrypted, decipher.final()]);
-
-  return decrypted;
-}
-
-// Rota de descriptografia REAL
+// Rota de descriptografia COMPLETA
 fastify.post('/api/v1/decrypt', async (request, reply) => {
+  const startTime = Date.now();
+  
   try {
-    const { mediaUrl, mediaKey, mediaType } = request.body;
+    const { mediaUrl, mediaKey, mediaType, encryptionType } = request.body;
     
+    // Validação obrigatória
     if (!mediaUrl || !mediaKey || !mediaType) {
       return reply.status(400).send({
-        error: 'Missing required fields: mediaUrl, mediaKey, mediaType'
+        error: 'Missing required fields',
+        required: ['mediaUrl', 'mediaKey', 'mediaType'],
+        received: { mediaUrl: !!mediaUrl, mediaKey: !!mediaKey, mediaType: !!mediaType }
       });
     }
 
-    // Download arquivo criptografado
-    const response = await fetch(mediaUrl, {
-      timeout: 60000,
-      headers: {
-        'User-Agent': 'WhatsApp/2.23.20 (iPhone; iOS 16.6; Scale/3.00)',
-        'Accept': '*/*',
-        'Connection': 'keep-alive'
-      }
+    console.log(`🔄 Starting decryption for ${mediaType} file`);
+    console.log(`📍 URL: ${mediaUrl.substring(0, 50)}...`);
+    console.log(`🔑 MediaKey length: ${mediaKey.length}`);
+
+    // 1. Download arquivo criptografado
+    console.log('📥 Downloading encrypted file...');
+    const encryptedData = await MediaDownload.downloadMedia(mediaUrl, {
+      timeout: 120000,
+      retries: 3
     });
-
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-    }
-
-    const encryptedData = Buffer.from(await response.arrayBuffer());
     
-    // Descriptografar
-    const expandedKey = expandMediaKey(mediaKey, mediaType);
-    const decryptedData = decryptData(encryptedData, expandedKey);
+    console.log(`✅ Downloaded ${encryptedData.length} bytes`);
 
-    // Retornar arquivo descriptografado
-    const contentType = mediaType === 'document' ? 'application/octet-stream' : 'application/octet-stream';
-    const filename = `decrypted_${Date.now()}.${mediaType === 'document' ? 'pdf' : 'bin'}`;
+    // 2. Validar e expandir chave
+    console.log('🔑 Expanding media key...');
+    const expandedKey = MediaDecryption.expandMediaKey(mediaKey, mediaType);
     
+    // 3. Descriptografar
+    console.log('🔓 Decrypting file...');
+    const decryptedData = await MediaDecryption.decryptData(encryptedData, expandedKey);
+    
+    console.log(`✅ Decrypted ${decryptedData.length} bytes`);
+
+    // 4. Preparar resposta
+    const contentType = MediaDecryption.getContentType(mediaType);
+    const fileExtension = MediaDecryption.getFileExtension(mediaType);
+    const filename = `decrypted_${Date.now()}.${fileExtension}`;
+    
+    // Headers para download
     reply.header('Content-Type', contentType);
     reply.header('Content-Disposition', `attachment; filename="${filename}"`);
     reply.header('Content-Length', decryptedData.length);
+    reply.header('Cache-Control', 'no-cache, no-store, must-revalidate');
+    reply.header('X-Content-Type-Options', 'nosniff');
+    
+    const processingTime = Date.now() - startTime;
+    console.log(`🎉 Decryption completed in ${processingTime}ms`);
+    
+    // Cleanup seguro da chave
+    MediaDecryption.secureKeyCleanup(expandedKey);
     
     return reply.send(decryptedData);
     
   } catch (error) {
-    console.error('Decryption error:', error);
+    const processingTime = Date.now() - startTime;
+    console.error('❌ Decryption failed:', error.message);
+    
+    if (error instanceof ValidationError) {
+      return reply.status(400).send({
+        error: 'Validation failed',
+        message: error.message,
+        processingTime
+      });
+    }
+    
+    if (error instanceof NetworkError) {
+      return reply.status(502).send({
+        error: 'Network error',
+        message: 'Failed to download media file',
+        details: error.message,
+        processingTime
+      });
+    }
+    
+    if (error instanceof DecryptionError) {
+      return reply.status(422).send({
+        error: 'Decryption failed',
+        message: 'Invalid media key or corrupted file',
+        details: error.message,
+        processingTime
+      });
+    }
+    
     return reply.status(500).send({
-      error: 'Decryption failed',
-      message: error.message
+      error: 'Internal server error',
+      message: error.message,
+      processingTime
     });
   }
 });
@@ -152,11 +145,15 @@ fastify.post('/api/v1/decrypt', async (request, reply) => {
 // Start server
 const start = async () => {
   try {
+    // Inicializar FileManager
+    await FileManager.ensureDirectories();
+    
     const host = '0.0.0.0';
     const port = parseInt(process.env.PORT) || 3000;
     
     await fastify.listen({ host, port });
     console.log(`✅ Server listening on ${host}:${port}`);
+    console.log(`🔗 API endpoint: http://${host}:${port}/api/v1/decrypt`);
     
   } catch (error) {
     console.error('❌ Failed to start server:', error);
